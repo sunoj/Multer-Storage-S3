@@ -1,144 +1,89 @@
 var path = require( 'path' );
 var crypto = require( 'crypto' );
-var mime = require( 'mime-types' );
-var AWS = require( 'aws-sdk' );
+var qiniu = require( 'qiniu' );
 
 function getFilename( req, file, cb ) {
-
-	crypto.pseudoRandomBytes( 16, function ( err, raw ) {
-
-		cb( err, err ? undefined : raw.toString( 'hex' ) );
-
-	});
-
+  crypto.pseudoRandomBytes( 16, function ( err, raw ) {
+    cb( err, err ? undefined : raw.toString( 'hex' ) );
+  });
 }
 
 function getDestination( req, file, cb ) {
-
-	cb( null, '' );
-
+  cb( null, '' );
 }
 
-function S3Storage( opts ) {
+function QNStorage( opts ) {
+  this.getFilename = ( opts.filename || getFilename );
+  if ( 'string' === typeof opts.destination ) {
+    this.getDestination = function( $0, $1, cb ) { cb( null, opts.destination ); }
+  } else {
+    this.getDestination = ( opts.destination || getDestination );
+  }
 
-	this.getFilename = ( opts.filename || getFilename );
+  if ( ! opts.config ) {
+    throw new Error( 'You have to specify config for Qiniu Storage to work.' );
+  }
 
-	if ( 'string' === typeof opts.destination ) {
+  opts.bucket = ( opts.config.bucket || null );
 
-		this.getDestination = function( $0, $1, cb ) { cb( null, opts.destination ); }
+  qiniu.conf.ACCESS_KEY = opts.config.ACCESS_KEY;
+  qiniu.conf.SECRET_KEY = opts.config.SECRET_KEY;
 
-	} else {
+  this.uploadFile = function (key, body, callback) {
+    var token = new qiniu.rs.PutPolicy(opts.bucket).token();
+    var extra = new qiniu.io.PutExtra();
+    qiniu.io.putReadable(token, key, body, extra, function (err, ret) {
+      callback(err, ret)
+    });
+  };
 
-		this.getDestination = ( opts.destination || getDestination );
+  this.deleteFile = function (obj, callback) {
+    var client = new qiniu.rs.Client();
+    client.remove(obj.Bucket, obj.Key, callback);
+  };
 
-	}
-
-	opts.region = ( opts.region || process.env.AWS_REGION || 'us-west-2' );
-	opts.bucket = ( opts.bucket || process.env.S3_BUCKET || null );
-
-	if ( ! opts.bucket ) {
-
-		throw new Error( 'You have to specify bucket for S3 Storage to work.' );
-
-	}
-
-	AWS.config.region = opts.region;
-
-	this.s3obj = new AWS.S3({
-		params: {
-			Bucket: opts.bucket
-		}
-	});
-
-	this.options = opts;
-
+  this.options = opts;
 }
 
-S3Storage.prototype._handleFile = function _handleFile( req, file, cb ) {
+QNStorage.prototype._handleFile = function _handleFile( req, file, cb ) {
+  var self = this;
+  self.getDestination( req, file, function( err, destination ) {
+    if ( err ) {
+      return cb( err );
+    }
+    self.getFilename( req, file, function( err, filename ) {
+      if ( err ) {
+        return cb( err );
+      }
 
-	var self = this
+      var finalPath = path.join( destination, filename ),
+        Key = finalPath,
+        Body= file.stream;
 
-	self.getDestination( req, file, function( err, destination ) {
-
-		if ( err ) {
-
-			return cb( err );
-
-		}
-
-		self.getFilename( req, file, function( err, filename ) {
-
-			if ( err ) {
-
-				return cb( err );
-
-			}
-
-			var finalPath = path.join( destination, filename ),
-				size,
-				contentType = mime.lookup( finalPath ),
-				params = {
-					Key : finalPath,
-					Body: file.stream
-				};
-
-			if ( contentType ) {
-				
-				params.ContentType = contentType;
-				
-			}
-
-			self.s3obj
-				.upload( params )
-				.on( 'httpUploadProgress', function( info ){
-
-					if ( info.total ) {
-
-						size = info.total;
-
-					}
-
-				})
-				.send( function( err, data ) {
-
-					if ( err ) {
-
-						cb( err, data );
-
-					} else {
-
-						cb( null, {
-							destination: destination,
-							filename   : filename,
-							path       : finalPath,
-							size       : size,
-							s3         : {
-								ETag    : data.ETag,
-								Location: data.Location
-							}
-						});
-
-					}
-
-				});
-
-		});
-
-	});
-
+      self.uploadFile( Key, Body, function( err, data ) {
+        if ( err ) {
+          cb( err, data );
+        } else {
+          cb( null, {
+            destination: destination,
+            filename   : filename,
+            path       : finalPath
+          });
+        }
+      });
+    });
+  });
 };
-	
-S3Storage.prototype._removeFile = function _removeFile( req, file, cb ) {
-	
-	this.s3obj.deleteObject({
-		Bucket: this.options.bucket,
-		Key   : file.path
-	}, cb );
+  
+QNStorage.prototype._removeFile = function _removeFile( req, file, cb ) {
+  
+  this.deleteFile({
+    Bucket: this.bucket,
+    Key   : file.path
+  }, cb );
 
 };
 
 module.exports = function( opts ) {
-
-	return new S3Storage( opts );
-
+  return new QNStorage( opts );
 };
